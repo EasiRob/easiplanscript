@@ -1,74 +1,174 @@
-@echo off
+<#
+.SYNOPSIS
+    Installs the EasiPlanAgent from an MSI package on a network share.
+    Also ensures the scheduled task is created with a daily trigger.
+    This script is designed to run as a GPO Computer Startup Script.
+#>
 
-:: ===========================================================================
-:: --- Configuration: To Install EasiPlan You MUST Edit the 4 items below ---
-:: ===========================================================================
+# ============================================================================
+# --- Configuration: To Install EasiPlan You MUST Edit items 1 and 2 below ---
+# ============================================================================
 
-: 1. Your unique API key
-SET "APIKEY_VALUE=c******************"
+# 1. Your unique API key
+$APIKEY_VALUE = "c******************"
 
-:: 2. The *network share* (UNC path) where "EasiPlanAgent.msi" is located
-SET "INSTALLER_SHARE=\\YourServer\YourShare"
+# 2. The *network share* (UNC path) where "EasiPlanAgent.msi" is located
+$INSTALLER_SHARE = "\\YourServer\YourShare"
 
-:: 3. The full path to a file that proves the agent is installed
-::    (This prevents the script from running on every reboot)
-::    (*** You MUST check and update this path ***)
-SET "CHECK_FILE=C:\Program Files\EasiPlanAgent\agent.exe"
+# 3. The full path to a file that proves the agent is installed
+#    (*** You MUST check and update this path ***)
+$CHECK_FILE = "C:\Program Files\EasiPlanDeviceAgent\DeviceInfoAgent.exe"
 
-:: 4. A folder for the installation log files (optional, but recommended)
-SET "LOG_PATH=C:\Temp\InstallLogs"
+# 4. A folder for the installation log files (optional, but recommended)
+$LOG_PATH = "C:\Temp\InstallLogs"
 
-:: ==================================================================
-:: --- Do Not Edit Below This Line ---
-:: ==================================================================
+# ==================================================================
+# --- Do Not Edit Below This Line ---
+# ==================================================================
 
-:: --- Set up full paths ---
-SET "MsiFile=%INSTALLER_SHARE%\EasiPlanAgent.msi"
-SET "MsiLogFile=%LOG_PATH%\EasiPlanAgent_install_log.txt"
-SET "ScriptLogFile=%LOG_PATH%\EasiPlanAgent_script_log.txt"
+# --- Set up full paths ---
+$MsiFile = Join-Path -Path $INSTALLER_SHARE -ChildPath "EasiPlanAgent.msi"
+$MsiLogFile = Join-Path -Path $LOG_PATH -ChildPath "EasiPlanAgent_install_log.txt"
+$ScriptLogFile = Join-Path -Path $LOG_PATH -ChildPath "EasiPlanAgent_script_log.txt"
 
-:: --- Create log directory ---
-if not exist "%LOG_PATH%" mkdir "%LOG_PATH%"
+# --- Create log directory ---
+if (-not (Test-Path -Path $LOG_PATH)) {
+    try {
+        New-Item -ItemType Directory -Path $LOG_PATH -ErrorAction Stop | Out-Null
+    }
+    catch {
+        Write-Error "Failed to create log directory at $LOG_PATH. Exiting."
+        exit 1
+    }
+}
 
-:: --- Logging function ---
-:log
-echo %DATE% %TIME%: %* >> "%ScriptLogFile%"
-goto :eof
+# --- Logging function ---
+function Write-Log {
+    param (
+        [string]$Message
+    )
+    $Timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    $LogLine = "${Timestamp}: $Message"
+    try {
+        Add-Content -Path $ScriptLogFile -Value $LogLine -ErrorAction Stop
+    }
+    catch {
+        Write-Warning "Failed to write to log file: $ScriptLogFile"
+    }
+}
 
-:: --- Start Script ---
-call :log "--- EasiPlanAgent Install Script Started ---"
+# --- Start Script ---
+Write-Log -Message "--- EasiPlanAgent Install Script Started (PowerShell) ---"
 
-:: --- 1. Check if already installed ---
-if exist "%CHECK_FILE%" (
-    call :log "Check file found: %CHECK_FILE%"
-    call :log "Software is already installed. Exiting."
-    goto :End
-)
+# --- 1. Check if software is installed ---
+if (Test-Path -Path $CHECK_FILE) {
+    Write-Log -Message "Check file found: $CHECK_FILE. Software is installed."
+}
+else {
+    Write-Log -Message "Check file not found. Starting installation..."
 
-:: --- 2. Check if installer exists ---
-if not exist "%MsiFile%" (
-    call :log "ERROR: Installer not found at: %MsiFile%"
-    call :log "Script cannot continue. Exiting."
-    goto :End
-)
+    # --- 2. Check if installer exists ---
+    if (-not (Test-Path -Path $MsiFile)) {
+        Write-Log -Message "ERROR: Installer not found at: $MsiFile"
+        Write-Log -Message "Script cannot continue. Exiting."
+        Write-Log -Message "--- Script Finished ---"
+        exit 1
+    }
 
-:: --- 3. Run the installation ---
-call :log "Starting installation from: %MsiFile%"
-call :log "Applying APIKEY..."
+    # --- 3. Run the installation ---
+    Write-Log -Message "Starting installation from: $MsiFile"
+    Write-Log -Message "Applying APIKEY..."
 
-:: This runs your command silently (/qn) and creates a verbose log (/L*v)
-msiexec /i "%MsiFile%" APIKEY="%APIKEY_VALUE%" /qn /L*v "%MsiLogFile%"
+    # Build the argument list for msiexec.exe
+    $MsiArguments = @(
+        "/i",
+        "`"$MsiFile`"",
+        "APIKEY=`"$APIKEY_VALUE`"",
+        "/qn",
+        "/L*v",
+        "`"$MsiLogFile`""
+    )
 
-:: --- 4. Check result ---
-if %ERRORLEVEL% == 0 (
-    call :log "Installer finished successfully (Code 0)."
-) else if %ERRORLEVEL% == 3010 (
-    call :log "Installer finished with Code 3010 (Reboot Required)."
-) else (
-    call :log "INSTALLER FAILED with Error Code: %ERRORLEVEL%."
-    call :log "Check the MSI log for details: %MsiLogFile%"
-)
+    try {
+        # Start msiexec, wait for it to complete (-Wait), and get the process object (-PassThru)
+        $InstallProcess = Start-Process -FilePath "msiexec.exe" -ArgumentList $MsiArguments -Wait -PassThru -ErrorAction Stop
+        $ExitCode = $InstallProcess.ExitCode
+    }
+    catch {
+        Write-Log -Message "INSTALLER FAILED to launch. Error: $_"
+        Write-Log -Message "--- Script Finished ---"
+        exit 1
+    }
 
-:End
-call :log "--- Script Finished ---"
-goto :eof
+    # --- 4. Check install result ---
+    if ($ExitCode -eq 0) {
+        Write-Log -Message "Installer finished successfully (Code 0)."
+    }
+    elseif ($ExitCode -eq 3010) {
+        Write-Log -Message "Installer finished with Code 3010 (Reboot Required)."
+    }
+    else {
+        Write-Log -Message "INSTALLER FAILED with Error Code: $ExitCode."
+        Write-Log -Message "Check the MSI log for details: $MsiLogFile"
+        Write-Log -Message "--- Script Finished ---"
+        exit $ExitCode # Exit if the install failed, no point trying to make the task
+    }
+}
+
+# --- 5. Check and create Scheduled Task ---
+$TaskName = "EasiPlan Agent Task"
+$TaskPath = "\EasiPlan" # Optional: Puts it in a folder in Task Scheduler
+$TaskExists = Get-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction SilentlyContinue
+
+if ($TaskExists) {
+    Write-Log -Message "Scheduled Task '$TaskName' already exists. No action needed."
+}
+else {
+    Write-Log -Message "Scheduled Task '$TaskName' not found. Creating it..."
+    
+    # Ensure the check file exists before trying to create a task for it
+    if (-not (Test-Path -Path $CHECK_FILE)) {
+        Write-Log -Message "ERROR: Cannot create task because the executable is missing: $CHECK_FILE"
+        Write-Log -Message "--- Script Finished ---"
+        exit 1
+    }
+    
+    try {
+        # --- Define Task Action with Arguments and "Start In" ---
+        
+        # 1. Define Arguments (using the API key from the top of the script)
+        $TaskArgs = "--apiurl `"https://ingestdevicedata-plleqvdknq-nw.a.run.app`" --apikey `"$APIKEY_VALUE`""
+        
+        # 2. Define "Start In" (Working Directory) by getting the parent folder of the exe
+        $TaskWorkDir = Split-Path -Path $CHECK_FILE -Parent
+        
+        # 3. Create the Action
+        $TaskAction = New-ScheduledTaskAction -Execute $CHECK_FILE -Argument $TaskArgs -WorkingDirectory $TaskWorkDir
+        
+        # --- Define Trigger (Daily at 10am) ---
+        $TaskTrigger = New-ScheduledTaskTrigger -Daily -At "10:00am"
+        
+        # --- Define Principal (who to run as) ---
+        $TaskPrincipal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -RunLevel Highest
+
+        # --- Define Settings (to run if missed) ---
+        $TaskSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable
+        
+        # --- Register the task ---
+        Register-ScheduledTask -TaskName $TaskName `
+                               -TaskPath $TaskPath `
+                               -Action $TaskAction `
+                               -Trigger $TaskTrigger `
+                               -Principal $TaskPrincipal `
+                               -Settings $TaskSettings `
+                               -ErrorAction Stop
+        
+        Write-Log -Message "Successfully created Scheduled Task: '$TaskName'."
+    }
+    catch {
+        Write-Log -Message "ERROR: Failed to create Scheduled Task. Error: $_"
+    }
+}
+
+Write-Log -Message "--- Script Finished ---"
+exit 0
